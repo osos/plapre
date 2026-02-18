@@ -2,6 +2,19 @@
 
 Danish text-to-speech synthesis. Uses llama.cpp for fast inference.
 
+## Prerequisites
+
+The Plapre models are hosted as **gated models** on Hugging Face. Before using Plapre, you need to:
+
+1. **Accept the model agreement** on the model page:
+   - [syvai/plapre-nano](https://huggingface.co/syvai/plapre-nano)
+   - [syvai/plapre-pico](https://huggingface.co/syvai/plapre-pico)
+2. **Create a Hugging Face token** with `Read access to contents of all public gated repos you can access` permission at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+3. **Log in** via the CLI:
+   ```bash
+   huggingface-cli login
+   ```
+
 ## Installation
 
 ```bash
