@@ -2,21 +2,20 @@
 FastAPI server for Plapre Danish TTS with chunked PCM streaming.
 
 Start with:
-    plapre-serve --model plapre-nano-q8_0 --port 8000
+    plapre-serve --port 8000
 
 Or:
-    PLAPRE_MODEL=plapre-nano-q8_0 uvicorn plapre.server:app
+    uvicorn plapre.server:app
 """
 
 import asyncio
 import logging
 import os
 import struct
-import tempfile
 from contextlib import asynccontextmanager
 
 import numpy as np
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
@@ -25,29 +24,10 @@ from plapre.inference import SAMPLE_RATE, Plapre
 log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Model registry
-# ---------------------------------------------------------------------------
-
-MODELS = {
-    "plapre-pico-f16": ("syvai/plapre-pico", "f16"),
-    "plapre-pico-q8_0": ("syvai/plapre-pico", "q8_0"),
-    "plapre-pico-q6_k": ("syvai/plapre-pico", "q6_k"),
-    "plapre-pico-q4_k_m": ("syvai/plapre-pico", "q4_k_m"),
-    "plapre-pico-q4_0": ("syvai/plapre-pico", "q4_0"),
-    "plapre-nano-f16": ("syvai/plapre-nano", "f16"),
-    "plapre-nano-q8_0": ("syvai/plapre-nano", "q8_0"),
-    "plapre-nano-q6_k": ("syvai/plapre-nano", "q6_k"),
-    "plapre-nano-q4_k_m": ("syvai/plapre-nano", "q4_k_m"),
-    "plapre-nano-q4_0": ("syvai/plapre-nano", "q4_0"),
-}
-DEFAULT_MODEL = "plapre-pico-q8_0"
-
-# ---------------------------------------------------------------------------
 # Global state
 # ---------------------------------------------------------------------------
 
 _tts: Plapre | None = None
-_loaded_model: str = ""
 _lock = asyncio.Lock()
 
 
@@ -57,18 +37,18 @@ _lock = asyncio.Lock()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _tts, _loaded_model
+    global _tts
 
-    model_name = os.environ.get("PLAPRE_MODEL", DEFAULT_MODEL)
-    if model_name not in MODELS:
-        raise ValueError(
-            f"Unknown model '{model_name}'. Available: {list(MODELS.keys())}"
-        )
-    checkpoint, quant = MODELS[model_name]
-    log.info("Loading model %s (checkpoint=%s, quant=%s) …", model_name, checkpoint, quant)
-    _tts = Plapre(checkpoint, quant=quant)
-    _loaded_model = model_name
-    log.info("Model %s ready.", model_name)
+    checkpoint = os.environ.get("PLAPRE_CHECKPOINT", "syvai/plapre-nano")
+    gpu_mem = float(os.environ.get("PLAPRE_GPU_MEM", "0.5"))
+    max_len = int(os.environ.get("PLAPRE_MAX_MODEL_LEN", "512"))
+    log.info("Loading model %s (gpu_mem=%.2f, max_len=%d) …", checkpoint, gpu_mem, max_len)
+    _tts = Plapre(
+        checkpoint=checkpoint,
+        gpu_memory_utilization=gpu_mem,
+        max_model_len=max_len,
+    )
+    log.info("Model ready.")
     yield
     _tts = None
 
@@ -83,7 +63,6 @@ app = FastAPI(title="Plapre TTS", lifespan=lifespan)
 class SpeechRequest(BaseModel):
     text: str
     speaker: str | None = None
-    model: str = DEFAULT_MODEL
     temperature: float = 0.8
     top_p: float = 0.95
     top_k: int = 50
@@ -110,13 +89,6 @@ async def speech(req: SpeechRequest):
     if _tts is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
-    if req.model != _loaded_model:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Requested model '{req.model}' but server loaded '{_loaded_model}'. "
-                   f"Restart the server with --model {req.model}.",
-        )
-
     try:
         spk = _tts._resolve_speaker(req.speaker, None, None)
     except ValueError as e:
@@ -133,20 +105,38 @@ async def speech(req: SpeechRequest):
     if not sentences:
         raise HTTPException(status_code=400, detail="No text provided")
 
-    silence_samples = int(0.1 * SAMPLE_RATE)
+    silence_samples = int(0.3 * SAMPLE_RATE)
     silence_bytes = struct.pack(f"<{silence_samples}h", *([0] * silence_samples))
+
+    prefetch_count = 2  # sequential first N for low latency
 
     async def generate():
         async with _lock:
-            log.info("Generating %d sentences in batch: %s", len(sentences), sentences)
-            audios = await asyncio.to_thread(
-                _tts._generate_audio_batch, sentences, spk, **gen_kwargs,
-            )
-            for i, audio in enumerate(audios):
+            # --- Phase 1: Sequential for fast first audio ---
+            seq_limit = min(prefetch_count, len(sentences))
+            for i in range(seq_limit):
+                log.info("Sequential sentence %d/%d: %s", i + 1, len(sentences), sentences[i])
+                audio = await asyncio.to_thread(
+                    _tts._generate_audio, sentences[i], spk, **gen_kwargs,
+                )
                 if audio is not None:
                     yield _float32_to_pcm16(audio)
-                    if i < len(audios) - 1:
+                    if i < len(sentences) - 1:
                         yield silence_bytes
+
+            # --- Phase 2: Batch remaining via vLLM ---
+            remaining = sentences[seq_limit:]
+            if remaining:
+                log.info("Batch generating %d remaining sentences", len(remaining))
+                results = await asyncio.to_thread(
+                    _tts._generate_audio_batch, remaining, spk, **gen_kwargs,
+                )
+                for j, audio in enumerate(results):
+                    if audio is not None:
+                        yield _float32_to_pcm16(audio)
+                        global_idx = seq_limit + j
+                        if global_idx < len(sentences) - 1:
+                            yield silence_bytes
 
     return StreamingResponse(
         generate(),
@@ -166,32 +156,6 @@ async def speakers():
     return {"speakers": list(_tts.speakers.keys())}
 
 
-@app.post("/v1/speakers")
-async def add_speaker(name: str = Form(...), file: UploadFile = File(...)):
-    if _tts is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
-
-    if not file.filename or not file.filename.lower().endswith(".wav"):
-        raise HTTPException(status_code=400, detail="File must be a .wav file")
-
-    if name in _tts.speakers:
-        raise HTTPException(status_code=409, detail=f"Speaker '{name}' already exists")
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=True) as tmp:
-        tmp.write(await file.read())
-        tmp.flush()
-        emb = await asyncio.to_thread(_tts._extract_speaker_emb, tmp.name)
-
-    _tts.speakers[name] = emb
-    log.info("Added speaker '%s', norm=%.3f", name, emb.norm())
-    return {"speaker": name, "speakers": list(_tts.speakers.keys())}
-
-
-@app.get("/v1/models")
-async def models():
-    return {"models": list(MODELS.keys()), "loaded": _loaded_model}
-
-
 @app.get("/health")
 async def health():
     return {"status": "ok"}
@@ -208,15 +172,24 @@ def main():
 
     parser = argparse.ArgumentParser(description="Plapre TTS server")
     parser.add_argument(
-        "--model", default=DEFAULT_MODEL, choices=list(MODELS.keys()),
-        help=f"Model to load (default: {DEFAULT_MODEL})",
+        "--checkpoint", default="syvai/plapre-nano",
+        help="HuggingFace checkpoint (default: syvai/plapre-nano)",
     )
+    parser.add_argument("--gpu-mem", type=float, default=0.5, help="GPU memory utilization (default: 0.5)")
+    parser.add_argument("--max-model-len", type=int, default=512, help="Max model length (default: 512)")
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000)")
     args = parser.parse_args()
 
-    os.environ["PLAPRE_MODEL"] = args.model
-    uvicorn.run("plapre.server:app", host=args.host, port=args.port)
+    os.environ["PLAPRE_CHECKPOINT"] = args.checkpoint
+    os.environ["PLAPRE_GPU_MEM"] = str(args.gpu_mem)
+    os.environ["PLAPRE_MAX_MODEL_LEN"] = str(args.max_model_len)
+    uvicorn.run(
+        "plapre.server:app",
+        host=args.host,
+        port=args.port,
+        http="httptools",
+    )
 
 
 if __name__ == "__main__":
