@@ -169,7 +169,7 @@ class Plapre:
         )
 
         if split_sentences:
-            sentences = self._split_sentences(text)
+            sentences = self._split_sentences(text)  # normalize included
             log.info("Batch generating %d sentences", len(sentences))
             results = self._generate_audio_batch(
                 sentences, spk, **gen_kwargs
@@ -188,7 +188,7 @@ class Plapre:
                 return np.array([], dtype=np.float32)
             audio = np.concatenate(chunks)
         else:
-            audio = self._generate_audio(text, spk, **gen_kwargs)
+            audio = self._generate_audio(self._normalize_text(text), spk, **gen_kwargs)
             if audio is None:
                 log.error(
                     "No audio tokens generated. Try different temperature/top_p."
@@ -397,6 +397,41 @@ class Plapre:
         return self.speakers[name]
 
     @staticmethod
+    def _normalize_numbers(text: str) -> str:
+        """Replace numbers with Danish words (e.g. '2,1' → 'to komma et')."""
+        from num2words import num2words
+
+        def _replace(m):
+            raw = m.group()
+            try:
+                return num2words(float(raw.replace(",", ".")), lang="da")
+            except (ValueError, OverflowError):
+                return raw
+
+        return re.sub(r"\d+(?:[,\.]\d+)?", _replace, text)
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        """Normalize raw article/document text for TTS."""
+        # Remove trailing separators and image captions (e.g. "--- caption text")
+        text = re.sub(r"\s*-{2,}.*$", "", text.strip(), flags=re.DOTALL)
+        # Collapse whitespace (newlines, tabs, multiple spaces → single space)
+        text = re.sub(r"\s+", " ", text)
+        # Numbers → Danish words
+        text = Plapre._normalize_numbers(text)
+        return text.strip()
+
+    @staticmethod
     def _split_sentences(text: str) -> list[str]:
-        parts = re.split(r"(?<=[.!?])\s+", text.strip())
-        return [p.strip() for p in parts if p.strip()]
+        # Normalize first
+        text = Plapre._normalize_text(text)
+        # Split on sentence-ending punctuation followed by space
+        parts = re.split(r"(?<=[.!?])\s+", text)
+        result = []
+        for p in parts:
+            p = p.strip()
+            # Strip leading dialogue dashes (Danish convention: "- quote")
+            p = re.sub(r"^[-–—]\s+", "", p)
+            if p:
+                result.append(p)
+        return result
