@@ -42,6 +42,9 @@ SPEAKER_DIM = 128
 HIDDEN_SIZE = 960
 KANADE_MODEL = "frothywater/kanade-25hz-clean"
 
+GGUF_QUANTS = ["f16", "q8_0", "q6_k", "q4_k_m", "q4_0"]
+DEFAULT_QUANT = "q8_0"
+
 
 def _patch_tokenizer_compat():
     """Patch transformers tokenizer for vLLM compatibility (tokenizers 5.x → 4.x)."""
@@ -62,40 +65,13 @@ def _patch_tokenizer_compat():
     tub.PreTrainedTokenizerBase.__init__ = _patched
 
 
-def _ensure_local_model(checkpoint: str) -> str:
-    """Download model and patch tokenizer_config.json for vLLM compatibility."""
-    path = snapshot_download(checkpoint)
-    local_dir = Path(path).parent / f"{Path(path).name}-vllm"
-    if local_dir.exists():
-        return str(local_dir)
-
-    import shutil
-
-    local_dir.mkdir(parents=True, exist_ok=True)
-    for f in Path(path).iterdir():
-        if f.is_file():
-            shutil.copy2(f, local_dir / f.name)
-
-    # Strip incompatible tokenizer fields for vLLM's transformers <5
-    tc_path = local_dir / "tokenizer_config.json"
-    if tc_path.exists():
-        with open(tc_path) as f:
-            cfg = json.load(f)
-        cfg.pop("extra_special_tokens", None)
-        cfg.pop("tokenizer_class", None)
-        cfg.pop("is_local", None)
-        with open(tc_path, "w") as f:
-            json.dump(cfg, f, indent=2)
-
-    return str(local_dir)
-
-
 class Plapre:
     """Danish text-to-speech synthesis."""
 
     def __init__(
         self,
         checkpoint: str = "syvai/plapre-nano",
+        quant: str = DEFAULT_QUANT,
         gpu_memory_utilization: float = 0.4,
         max_model_len: int = 512,
         device: str | None = None,
@@ -107,13 +83,9 @@ class Plapre:
 
         _patch_tokenizer_compat()
 
-        # --- Local model for vLLM ---
-        log.info("Preparing model from %s …", checkpoint)
-        self._model_path = _ensure_local_model(checkpoint)
-
         # --- Tokenizer (CPU) ---
         log.info("Loading tokenizer …")
-        self.tokenizer = AutoTokenizer.from_pretrained(self._model_path)
+        self.tokenizer = AutoTokenizer.from_pretrained(checkpoint)
         self.audio_token_start = self.tokenizer.convert_tokens_to_ids("<audio_0>")
         self.audio_token_end = self.tokenizer.convert_tokens_to_ids("<audio_12799>")
         self.text_tag = self.tokenizer.convert_tokens_to_ids("<text>")
@@ -127,14 +99,19 @@ class Plapre:
         log.info("Loading embedding layer …")
         self._embed_tokens = self._load_embed_tokens(checkpoint)
 
+        # --- Resolve GGUF model ---
+        gguf_path = self._resolve_gguf(checkpoint, quant)
+        log.info("Using GGUF model: %s", gguf_path)
+
         # --- vLLM engine ---
         log.info("Initializing vLLM engine …")
         os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
         from vllm import LLM
 
         self._llm = LLM(
-            model=self._model_path,
-            dtype="bfloat16",
+            model=gguf_path,
+            tokenizer=checkpoint,
+            dtype="auto",
             gpu_memory_utilization=gpu_memory_utilization,
             max_model_len=max_model_len,
             enforce_eager=False,
@@ -225,6 +202,17 @@ class Plapre:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_gguf(checkpoint: str, quant: str) -> str:
+        if quant not in GGUF_QUANTS:
+            quant = DEFAULT_QUANT
+        model_name = checkpoint.rstrip("/").split("/")[-1]
+        repo_path = f"gguf/{model_name}.{quant}.gguf"
+        local = Path(checkpoint) / repo_path
+        if local.exists():
+            return str(local)
+        return hf_hub_download(checkpoint, repo_path)
 
     def _load_speakers(self) -> dict[str, torch.Tensor]:
         path = Path(__file__).parent / "speakers.json"
