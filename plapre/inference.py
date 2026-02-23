@@ -500,8 +500,10 @@ class Plapre:
     def _split_sentences(text: str) -> list[str]:
         # Normalize first
         text = Plapre._normalize_text(text)
-        # Split on sentence-ending punctuation followed by space
-        parts = re.split(r"(?<=[.!?])\s+", text)
+        # Split on sentence-ending punctuation followed by space,
+        # but require 2+ word chars before the punctuation to avoid
+        # splitting on abbreviations like "H.C." or "f."
+        parts = re.split(r"(?<=\w{2}[.!?])\s+", text)
         result = []
         for p in parts:
             p = p.strip()
