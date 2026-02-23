@@ -178,7 +178,7 @@ class Plapre:
         top_k: int = 50,
         max_tokens: int = 500,
         split_sentences: bool = False,
-        silence_duration: float = 0.3,
+        silence_duration: float = 0.1,
     ) -> np.ndarray:
         """Synthesize speech and save to *output*. Returns the audio as a numpy array."""
         spk = self._resolve_speaker(speaker, speaker_wav, speaker_emb)
