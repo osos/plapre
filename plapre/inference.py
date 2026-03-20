@@ -87,7 +87,10 @@ class Plapre:
 
         # --- Tokenizer (CPU) ---
         log.info("Loading tokenizer …")
-        self.tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            checkpoint,
+            trust_remote_code=True,
+        )
         self.audio_token_start = self.tokenizer.convert_tokens_to_ids("<audio_0>")
         self.audio_token_end = self.tokenizer.convert_tokens_to_ids("<audio_12799>")
         self.text_tag = self.tokenizer.convert_tokens_to_ids("<text>")
@@ -116,6 +119,7 @@ class Plapre:
             engine_args = AsyncEngineArgs(
                 model=gguf_path,
                 tokenizer=checkpoint,
+                trust_remote_code=True,
                 dtype="auto",
                 gpu_memory_utilization=gpu_memory_utilization,
                 max_model_len=max_model_len,
@@ -132,6 +136,7 @@ class Plapre:
             self._llm = LLM(
                 model=gguf_path,
                 tokenizer=checkpoint,
+                trust_remote_code=True,
                 dtype="auto",
                 gpu_memory_utilization=gpu_memory_utilization,
                 max_model_len=max_model_len,
