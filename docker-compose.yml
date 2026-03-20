@@ -1,0 +1,31 @@
+services:
+  plapre-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        CUDA_IMAGE: ${CUDA_IMAGE:-nvidia/cuda:13.1.1-cudnn-runtime-ubuntu24.04}
+    image: plapre-api:local
+    platform: ${DOCKER_PLATFORM:-linux/arm64}
+    gpus: all
+    ports:
+      - "${PLAPRE_PORT:-8000}:8000"
+    environment:
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+      PLAPRE_CHECKPOINT: ${PLAPRE_CHECKPOINT:-/models/plapre-nano}
+      PLAPRE_GPU_MEM: ${PLAPRE_GPU_MEM:-0.5}
+      PLAPRE_MAX_MODEL_LEN: ${PLAPRE_MAX_MODEL_LEN:-512}
+      PLAPRE_ASYNC: ${PLAPRE_ASYNC:-1}
+    volumes:
+      - ./models:/models
+      - ./hf-cache:/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: ${GPU_COUNT:-all}
+              capabilities: [gpu]
+    restart: unless-stopped
