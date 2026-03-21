@@ -10,16 +10,18 @@ services:
     gpus: all
     ports:
       - "${PLAPRE_PORT:-8000}:8000"
+    env_file: .env
     environment:
       HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      HF_TOKEN: ${HF_TOKEN:-}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
-      PLAPRE_CHECKPOINT: ${PLAPRE_CHECKPOINT:-/models/plapre-nano}
+      PLAPRE_CHECKPOINT: ${PLAPRE_CHECKPOINT:-syvai/plapre-nano}
+      PLAPRE_QUANT: ${PLAPRE_QUANT:-q8_0}
       PLAPRE_GPU_MEM: ${PLAPRE_GPU_MEM:-0.5}
       PLAPRE_MAX_MODEL_LEN: ${PLAPRE_MAX_MODEL_LEN:-512}
       PLAPRE_ASYNC: ${PLAPRE_ASYNC:-1}
     volumes:
-      - ./models:/models
       - ./hf-cache:/root/.cache/huggingface
     deploy:
       resources:
