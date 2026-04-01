@@ -318,26 +318,47 @@ def main():
 
     parser = argparse.ArgumentParser(description="Plapre TTS server")
     parser.add_argument(
-        "--checkpoint", default="syvai/plapre-nano",
-        help="HuggingFace checkpoint (default: syvai/plapre-nano)",
+        "--checkpoint",
+        default=None,
+        help="HuggingFace checkpoint (overrides PLAPRE_CHECKPOINT when provided)",
     )
     parser.add_argument(
         "--dtype",
-        default="auto",
-        help='vLLM dtype (e.g. "auto", "float16", "bfloat16"; default: auto)',
+        default=None,
+        help='vLLM dtype (e.g. "auto", "float16", "bfloat16"; overrides PLAPRE_DTYPE when provided)',
     )
-    parser.add_argument("--gpu-mem", type=float, default=0.5, help="GPU memory utilization (default: 0.5)")
-    parser.add_argument("--max-model-len", type=int, default=512, help="Max model length (default: 512)")
-    parser.add_argument("--sync", action="store_true", help="Use sync vLLM engine (default: async)")
+    parser.add_argument(
+        "--gpu-mem",
+        type=float,
+        default=None,
+        help="GPU memory utilization (overrides PLAPRE_GPU_MEM when provided)",
+    )
+    parser.add_argument(
+        "--max-model-len",
+        type=int,
+        default=None,
+        help="Max model length (overrides PLAPRE_MAX_MODEL_LEN when provided)",
+    )
+    parser.add_argument(
+        "--sync",
+        action="store_true",
+        default=None,
+        help="Use sync vLLM engine (sets PLAPRE_ASYNC=0 when provided)",
+    )
     parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
     parser.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000)")
     args = parser.parse_args()
 
-    os.environ["PLAPRE_CHECKPOINT"] = args.checkpoint
-    os.environ["PLAPRE_DTYPE"] = args.dtype
-    os.environ["PLAPRE_GPU_MEM"] = str(args.gpu_mem)
-    os.environ["PLAPRE_MAX_MODEL_LEN"] = str(args.max_model_len)
-    os.environ["PLAPRE_ASYNC"] = "0" if args.sync else "1"
+    if args.checkpoint is not None:
+        os.environ["PLAPRE_CHECKPOINT"] = args.checkpoint
+    if args.dtype is not None:
+        os.environ["PLAPRE_DTYPE"] = args.dtype
+    if args.gpu_mem is not None:
+        os.environ["PLAPRE_GPU_MEM"] = str(args.gpu_mem)
+    if args.max_model_len is not None:
+        os.environ["PLAPRE_MAX_MODEL_LEN"] = str(args.max_model_len)
+    if args.sync is True:
+        os.environ["PLAPRE_ASYNC"] = "0"
     uvicorn.run(
         "plapre.server:app",
         host=args.host,
