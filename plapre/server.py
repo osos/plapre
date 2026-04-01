@@ -122,8 +122,24 @@ class SpeechRequest(BaseModel):
 
 def _float32_to_pcm16(audio: np.ndarray) -> bytes:
     """Convert float32 [-1, 1] audio to 16-bit signed LE PCM bytes."""
-    clipped = np.clip(audio, -1.0, 1.0)
-    pcm = (clipped * 32767).astype(np.int16)
+    arr = np.asarray(audio, dtype=np.float32)
+
+    # Defensively normalize shape to mono to avoid malformed byte layout
+    # if an upstream vocoder ever returns channel dimensions.
+    if arr.ndim == 2:
+        # Heuristic: small leading dimension is likely channel-first.
+        if arr.shape[0] <= 8 and arr.shape[1] > arr.shape[0]:
+            arr = arr.mean(axis=0)
+        else:
+            arr = arr.mean(axis=1)
+    elif arr.ndim > 2:
+        arr = np.squeeze(arr)
+        if arr.ndim != 1:
+            arr = arr.reshape(-1)
+
+    clipped = np.clip(arr, -1.0, 1.0)
+    # Use explicit little-endian int16 independent of host endianness.
+    pcm = (clipped * 32767.0).astype("<i2")
     return pcm.tobytes()
 
 
