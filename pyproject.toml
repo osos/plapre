@@ -12,7 +12,7 @@ license = "MIT"
 dependencies = [
     "torch",
     "torchaudio",
-    "transformers>=5,<6",
+    "transformers",
     "vllm>=0.15",
     "safetensors",
     "soundfile",
