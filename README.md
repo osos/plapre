@@ -148,6 +148,8 @@ ffmpeg -f s16le -ar 24000 -ac 1 -i output.pcm output.wav
 ```
 
 The response is raw PCM (16-bit signed LE, 24kHz, mono) streamed per-sentence.
+OpenAI-compatible aliases are supported: `input`/`text` and `voice`/`speaker`.
+`response_format` and `stream_format` are accepted, and currently `pcm` + `audio` are implemented.
 
 ### Other endpoints
 

@@ -13,6 +13,7 @@ import logging
 import os
 import struct
 from contextlib import asynccontextmanager
+from typing import Literal
 
 import numpy as np
 import torch
@@ -85,6 +86,8 @@ class SpeechRequest(BaseModel):
         default=None,
         validation_alias=AliasChoices("speaker", "voice"),
     )
+    response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = "pcm"
+    stream_format: Literal["sse", "audio"] = "audio"
     temperature: float = 0.8
     top_p: float = 0.95
     top_k: int = 50
@@ -110,6 +113,16 @@ def _float32_to_pcm16(audio: np.ndarray) -> bytes:
 async def speech(req: SpeechRequest):
     if _tts is None:
         raise HTTPException(status_code=503, detail="Model not loaded")
+    if req.stream_format != "audio":
+        raise HTTPException(
+            status_code=400,
+            detail='Unsupported stream_format: only "audio" is currently supported',
+        )
+    if req.response_format != "pcm":
+        raise HTTPException(
+            status_code=400,
+            detail='Unsupported response_format: only "pcm" is currently supported',
+        )
 
     try:
         spk = _tts._resolve_speaker(req.speaker, None, None)
