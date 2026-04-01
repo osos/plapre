@@ -28,6 +28,7 @@ COPY plapre /app/plapre
 RUN pip install ".[serve]"
 
 ENV PLAPRE_CHECKPOINT=syvai/plapre-nano \
+    PLAPRE_DTYPE=auto \
     PLAPRE_GPU_MEM=0.5 \
     PLAPRE_MAX_MODEL_LEN=512 \
     PLAPRE_ASYNC=1

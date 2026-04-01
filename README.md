@@ -49,6 +49,13 @@ tts.speak("Hej, hvordan har du det?", output="output.wav")
 tts = Plapre("syvai/plapre-nano", gpu_memory_utilization=0.5)
 ```
 
+### Force vLLM dtype
+
+```python
+# Default is dtype="auto"
+tts = Plapre("syvai/plapre-nano", dtype="float16")
+```
+
 ### Choose a speaker
 
 Built-in speakers are loaded from the package. The first speaker is used by default.
@@ -126,7 +133,7 @@ plapre-serve --port 8000
 plapre-serve --checkpoint syvai/plapre-nano --gpu-mem 0.5 --port 8000
 ```
 
-Configuration via environment variables is also supported: `PLAPRE_CHECKPOINT`, `PLAPRE_GPU_MEM`, `PLAPRE_MAX_MODEL_LEN`.
+Configuration via environment variables is also supported: `PLAPRE_CHECKPOINT`, `PLAPRE_DTYPE` (default: `auto`), `PLAPRE_GPU_MEM`, `PLAPRE_MAX_MODEL_LEN`.
 
 ### Generate speech
 

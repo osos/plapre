@@ -72,6 +72,7 @@ class Plapre:
         self,
         checkpoint: str = "syvai/plapre-nano",
         quant: str = DEFAULT_QUANT,
+        dtype: str = "auto",
         gpu_memory_utilization: float = 0.4,
         max_model_len: int = 512,
         device: str | None = None,
@@ -82,6 +83,7 @@ class Plapre:
         self.device = torch.device(device)
         self._checkpoint = checkpoint
         self._use_async = use_async
+        self._dtype = dtype or "auto"
 
         _patch_tokenizer_compat()
 
@@ -120,7 +122,7 @@ class Plapre:
                 model=gguf_path,
                 tokenizer=checkpoint,
                 trust_remote_code=True,
-                dtype="auto",
+                dtype=self._dtype,
                 gpu_memory_utilization=gpu_memory_utilization,
                 max_model_len=max_model_len,
                 enforce_eager=False,
@@ -137,7 +139,7 @@ class Plapre:
                 model=gguf_path,
                 tokenizer=checkpoint,
                 trust_remote_code=True,
-                dtype="auto",
+                dtype=self._dtype,
                 gpu_memory_utilization=gpu_memory_utilization,
                 max_model_len=max_model_len,
                 enforce_eager=False,
@@ -165,7 +167,12 @@ class Plapre:
         # Cache for projected speaker embeddings
         self._proj_cache: dict[bytes, torch.Tensor] = {}
 
-        log.info("Ready – device=%s, async=%s", self.device, use_async)
+        log.info(
+            "Ready – device=%s, async=%s, dtype=%s",
+            self.device,
+            use_async,
+            self._dtype,
+        )
 
     # ------------------------------------------------------------------
     # Public API

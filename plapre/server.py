@@ -43,15 +43,24 @@ async def lifespan(app: FastAPI):
 
     checkpoint = os.environ.get("PLAPRE_CHECKPOINT", "syvai/plapre-nano")
     quant = os.environ.get("PLAPRE_QUANT", "q8_0")
+    dtype = os.environ.get("PLAPRE_DTYPE", "auto")
     gpu_mem = float(os.environ.get("PLAPRE_GPU_MEM", "0.5"))
     max_len = int(os.environ.get("PLAPRE_MAX_MODEL_LEN", "512"))
     _async_mode = os.environ.get("PLAPRE_ASYNC", "1") == "1"
     mode_str = "async" if _async_mode else "sync"
-    log.info("Loading model %s (quant=%s, gpu_mem=%.2f, max_len=%d, mode=%s) …",
-             checkpoint, quant, gpu_mem, max_len, mode_str)
+    log.info(
+        "Loading model %s (quant=%s, dtype=%s, gpu_mem=%.2f, max_len=%d, mode=%s) …",
+        checkpoint,
+        quant,
+        dtype,
+        gpu_mem,
+        max_len,
+        mode_str,
+    )
     _tts = Plapre(
         checkpoint=checkpoint,
         quant=quant,
+        dtype=dtype,
         gpu_memory_utilization=gpu_mem,
         max_model_len=max_len,
         use_async=_async_mode,
@@ -187,6 +196,11 @@ def main():
         "--checkpoint", default="syvai/plapre-nano",
         help="HuggingFace checkpoint (default: syvai/plapre-nano)",
     )
+    parser.add_argument(
+        "--dtype",
+        default="auto",
+        help='vLLM dtype (e.g. "auto", "float16", "bfloat16"; default: auto)',
+    )
     parser.add_argument("--gpu-mem", type=float, default=0.5, help="GPU memory utilization (default: 0.5)")
     parser.add_argument("--max-model-len", type=int, default=512, help="Max model length (default: 512)")
     parser.add_argument("--sync", action="store_true", help="Use sync vLLM engine (default: async)")
@@ -195,6 +209,7 @@ def main():
     args = parser.parse_args()
 
     os.environ["PLAPRE_CHECKPOINT"] = args.checkpoint
+    os.environ["PLAPRE_DTYPE"] = args.dtype
     os.environ["PLAPRE_GPU_MEM"] = str(args.gpu_mem)
     os.environ["PLAPRE_MAX_MODEL_LEN"] = str(args.max_model_len)
     os.environ["PLAPRE_ASYNC"] = "0" if args.sync else "1"
