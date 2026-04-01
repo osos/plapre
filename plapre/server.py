@@ -1,5 +1,5 @@
 """
-FastAPI server for Plapre Danish TTS with chunked PCM streaming.
+FastAPI server for Plapre Danish TTS with buffered/streamed PCM/WAV output.
 
 Start with:
     plapre-serve --port 8000
@@ -9,16 +9,18 @@ Or:
 """
 
 import asyncio
+import io
 import logging
 import os
 import struct
+import wave
 from contextlib import asynccontextmanager
-from typing import Literal
+from typing import AsyncGenerator, Literal
 
 import numpy as np
 import torch
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import AliasChoices, BaseModel, Field
 
 from plapre.inference import SAMPLE_RATE, Plapre
@@ -32,6 +34,14 @@ log = logging.getLogger(__name__)
 _tts: Plapre | None = None
 _vocoder_sem: asyncio.Semaphore | None = None
 _async_mode: bool = False
+_response_mode_default: Literal["buffered", "stream"] = "buffered"
+
+SUPPORTED_MODES_BY_FORMAT: dict[str, set[str]] = {
+    "pcm": {"buffered", "stream"},
+    "wav": {"buffered", "stream"},
+}
+DEFAULT_RESPONSE_MODE: Literal["buffered", "stream"] = "buffered"
+WAV_STREAM_PLACEHOLDER_SIZE = 0xFFFFFFFF
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +50,7 @@ _async_mode: bool = False
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _tts, _vocoder_sem, _async_mode
+    global _tts, _vocoder_sem, _async_mode, _response_mode_default
 
     checkpoint = os.environ.get("PLAPRE_CHECKPOINT", "syvai/plapre-nano")
     quant = os.environ.get("PLAPRE_QUANT", "q8_0")
@@ -48,15 +58,26 @@ async def lifespan(app: FastAPI):
     gpu_mem = float(os.environ.get("PLAPRE_GPU_MEM", "0.5"))
     max_len = int(os.environ.get("PLAPRE_MAX_MODEL_LEN", "512"))
     _async_mode = os.environ.get("PLAPRE_ASYNC", "1") == "1"
+    mode_raw = os.environ.get("PLAPRE_RESPONSE_MODE_DEFAULT", DEFAULT_RESPONSE_MODE)
+    mode = mode_raw.strip().lower()
+    if mode not in {"buffered", "stream"}:
+        log.warning(
+            "Invalid PLAPRE_RESPONSE_MODE_DEFAULT=%r, using %r",
+            mode_raw,
+            DEFAULT_RESPONSE_MODE,
+        )
+        mode = DEFAULT_RESPONSE_MODE
+    _response_mode_default = mode
     mode_str = "async" if _async_mode else "sync"
     log.info(
-        "Loading model %s (quant=%s, dtype=%s, gpu_mem=%.2f, max_len=%d, mode=%s) …",
+        "Loading model %s (quant=%s, dtype=%s, gpu_mem=%.2f, max_len=%d, mode=%s, response_mode_default=%s) …",
         checkpoint,
         quant,
         dtype,
         gpu_mem,
         max_len,
         mode_str,
+        _response_mode_default,
     )
     _tts = Plapre(
         checkpoint=checkpoint,
@@ -88,6 +109,7 @@ class SpeechRequest(BaseModel):
     )
     response_format: Literal["mp3", "opus", "aac", "flac", "wav", "pcm"] = "pcm"
     stream_format: Literal["sse", "audio"] = "audio"
+    response_mode: Literal["buffered", "stream"] | None = None
     temperature: float = 0.8
     top_p: float = 0.95
     top_k: int = 50
@@ -105,6 +127,61 @@ def _float32_to_pcm16(audio: np.ndarray) -> bytes:
     return pcm.tobytes()
 
 
+def _audio_headers() -> dict[str, str]:
+    return {
+        "X-Sample-Rate": str(SAMPLE_RATE),
+        "X-Channels": "1",
+        "X-Bit-Depth": "16",
+    }
+
+
+def _pcm16_to_wav(pcm16_bytes: bytes) -> bytes:
+    """Wrap mono 16-bit PCM bytes in a WAV container."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(SAMPLE_RATE)
+        wav_file.writeframes(pcm16_bytes)
+    return buf.getvalue()
+
+
+def _wav_stream_header() -> bytes:
+    """Build a WAV header with unknown total data length for live streaming."""
+    channels = 1
+    bits_per_sample = 16
+    bytes_per_sample = bits_per_sample // 8
+    block_align = channels * bytes_per_sample
+    byte_rate = SAMPLE_RATE * block_align
+    return b"".join(
+        [
+            b"RIFF",
+            struct.pack("<I", WAV_STREAM_PLACEHOLDER_SIZE),
+            b"WAVE",
+            b"fmt ",
+            struct.pack("<I", 16),
+            struct.pack(
+                "<HHIIHH",
+                1,  # PCM
+                channels,
+                SAMPLE_RATE,
+                byte_rate,
+                block_align,
+                bits_per_sample,
+            ),
+            b"data",
+            struct.pack("<I", WAV_STREAM_PLACEHOLDER_SIZE),
+        ]
+    )
+
+
+async def _collect_audio(chunks: AsyncGenerator[bytes, None]) -> bytes:
+    parts: list[bytes] = []
+    async for chunk in chunks:
+        parts.append(chunk)
+    return b"".join(parts)
+
+
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
@@ -118,10 +195,20 @@ async def speech(req: SpeechRequest):
             status_code=400,
             detail='Unsupported stream_format: only "audio" is currently supported',
         )
-    if req.response_format != "pcm":
+    if req.response_format not in SUPPORTED_MODES_BY_FORMAT:
         raise HTTPException(
             status_code=400,
-            detail='Unsupported response_format: only "pcm" is currently supported',
+            detail='Unsupported response_format: only "pcm" and "wav" are currently supported',
+        )
+    response_mode = (req.response_mode or _response_mode_default).strip().lower()
+    supported_modes = SUPPORTED_MODES_BY_FORMAT[req.response_format]
+    if response_mode not in supported_modes:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f'Unsupported response_mode "{response_mode}" for response_format '
+                f'"{req.response_format}". Supported modes: {sorted(supported_modes)}'
+            ),
         )
 
     try:
@@ -143,7 +230,7 @@ async def speech(req: SpeechRequest):
     silence_samples = int(0.1 * SAMPLE_RATE)
     silence_bytes = struct.pack(f"<{silence_samples}h", *([0] * silence_samples))
 
-    async def generate():
+    async def generate_pcm() -> AsyncGenerator[bytes, None]:
         if _async_mode:
             # Async: all sentences submitted concurrently, vLLM batches internally
             log.info("Generating %d sentence(s) via AsyncLLM", len(sentences))
@@ -172,14 +259,39 @@ async def speech(req: SpeechRequest):
                 if i < len(sentences) - 1:
                     yield silence_bytes
 
+    if req.response_format == "pcm":
+        if response_mode == "stream":
+            return StreamingResponse(
+                generate_pcm(),
+                media_type="audio/pcm",
+                headers=_audio_headers(),
+            )
+        pcm_bytes = await _collect_audio(generate_pcm())
+        return Response(
+            content=pcm_bytes,
+            media_type="audio/pcm",
+            headers=_audio_headers(),
+        )
+
+    # req.response_format == "wav"
+    if response_mode == "buffered":
+        pcm_bytes = await _collect_audio(generate_pcm())
+        wav_bytes = _pcm16_to_wav(pcm_bytes)
+        return Response(
+            content=wav_bytes,
+            media_type="audio/wav",
+            headers=_audio_headers(),
+        )
+
+    async def generate_wav_stream() -> AsyncGenerator[bytes, None]:
+        yield _wav_stream_header()
+        async for chunk in generate_pcm():
+            yield chunk
+
     return StreamingResponse(
-        generate(),
-        media_type="audio/pcm",
-        headers={
-            "X-Sample-Rate": str(SAMPLE_RATE),
-            "X-Channels": "1",
-            "X-Bit-Depth": "16",
-        },
+        generate_wav_stream(),
+        media_type="audio/wav",
+        headers=_audio_headers(),
     )
 
 

@@ -116,7 +116,7 @@ print(f"Duration: {len(audio) / 24000:.2f}s")
 
 ## API Server
 
-Plapre includes a FastAPI server that streams raw PCM audio with chunked transfer encoding, so clients can start playback before the full response is generated.
+Plapre includes a FastAPI server for OpenAI-style speech generation.
 
 ### Install
 
@@ -133,23 +133,42 @@ plapre-serve --port 8000
 plapre-serve --checkpoint syvai/plapre-nano --gpu-mem 0.5 --port 8000
 ```
 
-Configuration via environment variables is also supported: `PLAPRE_CHECKPOINT`, `PLAPRE_DTYPE` (default: `auto`), `PLAPRE_GPU_MEM`, `PLAPRE_MAX_MODEL_LEN`.
+Configuration via environment variables is also supported: `PLAPRE_CHECKPOINT`, `PLAPRE_DTYPE` (default: `auto`), `PLAPRE_GPU_MEM`, `PLAPRE_MAX_MODEL_LEN`, `PLAPRE_RESPONSE_MODE_DEFAULT` (`buffered` or `stream`, default: `buffered`).
 
 ### Generate speech
 
 ```bash
+# Buffered PCM (default response_mode)
 curl -X POST http://localhost:8000/v1/audio/speech \
   -H "Content-Type: application/json" \
   -d '{"text": "Hej, hvordan har du det?", "speaker": "mic"}' \
   --output output.pcm
 
-# Convert to WAV
-ffmpeg -f s16le -ar 24000 -ac 1 -i output.pcm output.wav
+# Streamed PCM
+curl -X POST http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hej, hvordan har du det?", "response_mode": "stream"}' \
+  --output output_stream.pcm
+
+# Buffered WAV
+curl -X POST http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hej, hvordan har du det?", "response_format": "wav"}' \
+  --output output.wav
+
+# Streamed WAV
+curl -X POST http://localhost:8000/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hej, hvordan har du det?", "response_format": "wav", "response_mode": "stream"}' \
+  --output output_stream.wav
 ```
 
-The response is raw PCM (16-bit signed LE, 24kHz, mono) streamed per-sentence.
+PCM audio is 16-bit signed LE, 24kHz, mono.
 OpenAI-compatible aliases are supported: `input`/`text` and `voice`/`speaker`.
-`response_format` and `stream_format` are accepted, and currently `pcm` + `audio` are implemented.
+`response_mode` is shared across all `response_format` values and resolves as:
+request `response_mode` > `PLAPRE_RESPONSE_MODE_DEFAULT` > `buffered`.
+`stream_format` is accepted for compatibility, and only `audio` is currently supported.
+Implemented `response_format` values are `pcm` and `wav`.
 
 ### Other endpoints
 
