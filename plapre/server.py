@@ -18,7 +18,7 @@ import numpy as np
 import torch
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import AliasChoices, BaseModel, Field
 
 from plapre.inference import SAMPLE_RATE, Plapre
 
@@ -71,8 +71,11 @@ app = FastAPI(title="Plapre TTS", lifespan=lifespan)
 # ---------------------------------------------------------------------------
 
 class SpeechRequest(BaseModel):
-    text: str
-    speaker: str | None = None
+    text: str = Field(validation_alias=AliasChoices("text", "input"))
+    speaker: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("speaker", "voice"),
+    )
     temperature: float = 0.8
     top_p: float = 0.95
     top_k: int = 50
