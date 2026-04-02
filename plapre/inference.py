@@ -46,6 +46,28 @@ GGUF_QUANTS = ["f16", "q8_0", "q6_k", "q4_k_m", "q4_0"]
 DEFAULT_QUANT = "q8_0"
 
 
+def _resolve_torch_dtype(dtype: str) -> torch.dtype:
+    normalized = (dtype or "auto").strip().lower()
+    if normalized == "auto":
+        return torch.bfloat16
+    dtype_map = {
+        "float16": torch.float16,
+        "half": torch.float16,
+        "fp16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+        "float32": torch.float32,
+        "fp32": torch.float32,
+    }
+    if normalized not in dtype_map:
+        log.warning(
+            "Unsupported dtype=%r for local torch modules; falling back to bfloat16",
+            dtype,
+        )
+        return torch.bfloat16
+    return dtype_map[normalized]
+
+
 def _patch_tokenizer_compat():
     """Patch transformers tokenizer for vLLM compatibility (tokenizers 5.x → 4.x)."""
     import transformers.tokenization_utils_base as tub
@@ -83,14 +105,17 @@ class Plapre:
         self.device = torch.device(device)
         self._checkpoint = checkpoint
         self._use_async = use_async
-        self._dtype = dtype or "auto"
+        self._dtype = (dtype or "auto").strip().lower()
+        self._torch_dtype = _resolve_torch_dtype(self._dtype)
+
+        self._tokenizer_path = os.environ.get("PLAPRE_TOKENIZER_PATH", checkpoint)
 
         _patch_tokenizer_compat()
 
         # --- Tokenizer (CPU) ---
         log.info("Loading tokenizer …")
         self.tokenizer = AutoTokenizer.from_pretrained(
-            checkpoint,
+            self._tokenizer_path,
             trust_remote_code=True,
         )
         self.audio_token_start = self.tokenizer.convert_tokens_to_ids("<audio_0>")
@@ -120,7 +145,7 @@ class Plapre:
 
             engine_args = AsyncEngineArgs(
                 model=gguf_path,
-                tokenizer=checkpoint,
+                tokenizer=self._tokenizer_path,
                 trust_remote_code=True,
                 dtype=self._dtype,
                 gpu_memory_utilization=gpu_memory_utilization,
@@ -137,7 +162,7 @@ class Plapre:
 
             self._llm = LLM(
                 model=gguf_path,
-                tokenizer=checkpoint,
+                tokenizer=self._tokenizer_path,
                 trust_remote_code=True,
                 dtype=self._dtype,
                 gpu_memory_utilization=gpu_memory_utilization,
@@ -265,7 +290,7 @@ class Plapre:
         else:
             path = hf_hub_download(checkpoint, "speaker_proj.pt")
             proj.load_state_dict(torch.load(path, map_location="cpu"))
-        return proj.to(torch.bfloat16).eval()
+        return proj.to(self._torch_dtype).eval()
 
     def _load_embed_tokens(self, checkpoint: str) -> nn.Embedding:
         """Load just the embedding layer from the model weights."""
@@ -280,16 +305,16 @@ class Plapre:
         state = load_file(st_path)
         weight = state["model.embed_tokens.weight"]
         embed = nn.Embedding(weight.shape[0], weight.shape[1])
-        embed.weight = nn.Parameter(weight.to(torch.bfloat16), requires_grad=False)
+        embed.weight = nn.Parameter(weight.to(self._torch_dtype), requires_grad=False)
         return embed.eval()
 
     @torch.no_grad()
     def _project_speaker(self, speaker_emb: torch.Tensor) -> torch.Tensor:
-        """Project 128-dim speaker embedding to 960-dim hidden, returns bf16 tensor."""
+        """Project 128-dim speaker embedding to 960-dim hidden."""
         key = speaker_emb.cpu().float().numpy().tobytes()
         if key in self._proj_cache:
             return self._proj_cache[key]
-        hidden = self.speaker_proj(speaker_emb.cpu().float().to(torch.bfloat16))
+        hidden = self.speaker_proj(speaker_emb.cpu().float().to(self._torch_dtype))
         self._proj_cache[key] = hidden
         return hidden
 
@@ -308,6 +333,12 @@ class Plapre:
             [speaker_hidden.unsqueeze(0), token_embeds], dim=0
         )  # (n_tokens+1, 960)
         return {"prompt_embeds": full_embeds}
+
+    def _allowed_generation_token_ids(self) -> list[int]:
+        ids = list(range(self.audio_token_start, self.audio_token_end + 1))
+        if self.eos_id is not None:
+            ids.append(self.eos_id)
+        return ids
 
     def _generate_tokens(
         self,
@@ -328,25 +359,55 @@ class Plapre:
             prompt_ids = self._build_prompt(text)
             prompts.append(self._build_embeds_prompt(prompt_ids, speaker_hidden))
 
-        sampling = SamplingParams(
+        sampling_kwargs = dict(
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
             max_tokens=max_tokens,
         )
 
+        allowed_ids = self._allowed_generation_token_ids()
+
+        # vLLM-versioner kan hedde forskelligt; prøv de mest sandsynlige felter.
+        for field in ("allowed_token_ids",):
+            try:
+                sampling = SamplingParams(**sampling_kwargs, **{field: allowed_ids})
+                break
+            except TypeError:
+                sampling = None
+
+        if sampling is None:
+            sampling = SamplingParams(**sampling_kwargs)
+
         outputs = self._llm.generate(prompts, sampling, use_tqdm=False)
+
+        for out in outputs:
+            toks = list(out.outputs[0].token_ids)
+            bad = [t for t in toks if not (self.audio_token_start <= t <= self.audio_token_end or t == self.eos_id)]
+            if bad:
+                log.warning("Generated non-audio tokens in audio stream: %s", bad[:10])
+
         return [list(o.outputs[0].token_ids) for o in outputs]
 
     def _tokens_to_audio(
         self, tokens: list[int], speaker_emb: torch.Tensor
     ) -> np.ndarray | None:
         """Convert generated token IDs to audio waveform via Kanade + Vocos."""
-        kanade_indices = [
-            tid - self.audio_token_start
-            for tid in tokens
-            if self.audio_token_start <= tid <= self.audio_token_end
-        ]
+        kanade_indices = []
+        audio_started = False
+
+        for tid in tokens:
+            if self.audio_token_start <= tid <= self.audio_token_end:
+                audio_started = True
+                kanade_indices.append(tid - self.audio_token_start)
+                continue
+
+            if tid == self.eos_id:
+                break
+
+            if audio_started:
+                log.warning("Stopping decode on first non-audio token after audio start: %r", tid)
+                break
         if not kanade_indices:
             return None
 
