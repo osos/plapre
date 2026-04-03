@@ -380,12 +380,15 @@ class Plapre:
             sampling = SamplingParams(**sampling_kwargs)
 
         outputs = self._llm.generate(prompts, sampling, use_tqdm=False)
+        result = [list(o.outputs[0].token_ids) for o in outputs]
 
-        for out in outputs:
-            toks = list(out.outputs[0].token_ids)
-            bad = [t for t in toks if not (self.audio_token_start <= t <= self.audio_token_end or t == self.eos_id)]
+        for token_ids in result:
+            bad = [
+                t for t in token_ids
+                if not (self.audio_token_start <= t <= self.audio_token_end or t == self.eos_id)
+            ]
             if bad:
-                log.warning("Generated non-audio tokens in audio stream: %s", bad[:10])
+                log.warning("TOKDBG generated non-audio tokens in stream: %s", bad[:20])
 
         return [list(o.outputs[0].token_ids) for o in outputs]
 
@@ -393,6 +396,13 @@ class Plapre:
         self, tokens: list[int], speaker_emb: torch.Tensor
     ) -> np.ndarray | None:
         """Convert generated token IDs to audio waveform via Kanade + Vocos."""
+
+        log.warning("TOKDBG raw tokens[:40]=%s", tokens[:40])
+        try:
+            log.warning("TOKDBG raw token strs[:20]=%s", self.tokenizer.convert_ids_to_tokens(tokens[:20]))
+        except Exception as e:
+            log.warning("TOKDBG token string decode failed: %s", e)
+
         kanade_indices = []
         audio_started = False
 
@@ -406,14 +416,37 @@ class Plapre:
                 break
 
             if audio_started:
-                log.warning("Stopping decode on first non-audio token after audio start: %r", tid)
+                log.warning("TOKDBG stopping decode on first non-audio token after audio start: %r", tid)
                 break
+
+        log.warning("TOKDBG kanade_indices[:40]=%s", kanade_indices[:40])
+
+        if os.environ.get("PLAPRE_REVERSE_AUDIO_TOKENS") == "1":
+            kanade_indices = list(reversed(kanade_indices))
+            log.warning("TOKDBG reversed kanade token order for testing")
+
         if not kanade_indices:
             return None
 
         tokens_tensor = torch.tensor(
             kanade_indices, dtype=torch.long, device=self.device
         )
+
+        log.warning(
+            "AUDDBG tokens_tensor shape=%s dtype=%s device=%s min=%s max=%s",
+            tuple(tokens_tensor.shape),
+            tokens_tensor.dtype,
+            tokens_tensor.device,
+            int(tokens_tensor.min().item()),
+            int(tokens_tensor.max().item()),
+        )
+        log.warning(
+            "AUDDBG speaker_emb shape=%s dtype=%s device=%s",
+            tuple(speaker_emb.shape),
+            speaker_emb.dtype,
+            speaker_emb.device,
+        )
+
         with torch.no_grad():
             mel = self.kanade.decode(
                 content_token_indices=tokens_tensor,
@@ -473,6 +506,18 @@ class Plapre:
             prompt, sampling, request_id=request_id
         ):
             final_output = out
+
+        result = list(final_output.outputs[0].token_ids)
+
+        for token_ids in result:
+            bad = [
+                t for t in token_ids
+                if not (self.audio_token_start <= t <= self.audio_token_end or t == self.eos_id)
+            ]
+            if bad:
+                log.warning("TOKDBG async generated non-audio tokens in stream: %s", bad[:20])
+
+
         return list(final_output.outputs[0].token_ids)
 
     async def generate_tokens_async(
@@ -496,12 +541,22 @@ class Plapre:
             prompt_ids = self._build_prompt(text)
             prompts.append(self._build_embeds_prompt(prompt_ids, speaker_hidden))
 
-        sampling = SamplingParams(
+        allowed_ids = self._allowed_generation_token_ids()
+
+        sampling_kwargs = dict(
             temperature=temperature,
             top_k=top_k,
             top_p=top_p,
             max_tokens=max_tokens,
         )
+
+        try:
+            sampling = SamplingParams(
+                **sampling_kwargs,
+                allowed_token_ids=allowed_ids,
+            )
+        except TypeError:
+            sampling = SamplingParams(**sampling_kwargs)
 
         tasks = [self._generate_one_async(p, sampling) for p in prompts]
         return await asyncio.gather(*tasks)
